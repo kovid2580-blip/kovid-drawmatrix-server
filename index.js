@@ -18,23 +18,19 @@ mongoose.connect(dbURI)
 
 app.use(authRoutes);
 
-// Serve static files from the React client build directory
-const path = require('path');
-const clientBuildPath = path.join(__dirname, '../client/dist');
-app.use(express.static(clientBuildPath));
-
-// Handle React Routing, return all requests to React app
-app.use((req, res) => {
-    res.sendFile(path.join(clientBuildPath, 'index.html'));
-});
+// Serve static files (disabled for standalone signaling server on Render)
+// const path = require('path');
+// const clientBuildPath = path.join(__dirname, '../client/dist');
+// app.use(express.static(clientBuildPath));
 
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*", // Allow all origins for now (dev mode)
+        origin: "*", // Allow all origins for production collaboration
         methods: ["GET", "POST"]
     }
 });
+
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -60,7 +56,8 @@ io.on('connection', (socket) => {
     });
 });
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+
