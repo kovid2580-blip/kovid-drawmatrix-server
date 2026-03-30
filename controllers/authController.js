@@ -83,3 +83,13 @@ module.exports.login_post = async (req, res) => {
         res.status(400).json({ errors });
     }
 }
+
+module.exports.get_users_get = async (req, res) => {
+    try {
+        const users = await User.find({}, { username: 1, email: 1, _id: 1 });
+        res.status(200).json(users);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to fetch users" });
+    }
+}
