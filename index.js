@@ -210,14 +210,175 @@ app.get('/api/presence', (req, res) => {
 // Presence tracking: { [projectId]: { [socketId]: presenceData } }
 const projectPresences = {};
 
+// Global fixed identity presence (used by schedules/editor pages).
+const FIXED_IDENTITIES = ['Kovid', 'Vedanth', 'Mohith'];
+let guestCounter = 1;
+const presenceRegistry = new Map();
+
+function getPresencePayload() {
+    return Array.from(presenceRegistry.values()).map((entry) => ({
+        userId: entry.userId,
+        name: entry.name,
+        status: entry.status,
+        firstSeen: entry.firstSeen,
+        lastSeen: entry.lastSeen,
+    }));
+}
+
+function broadcastPresence() {
+    io.emit('presence_list', { users: getPresencePayload() });
+}
+
+function assignIdentityForClient(clientKey) {
+    if (presenceRegistry.has(clientKey)) {
+        return presenceRegistry.get(clientKey);
+    }
+
+    const currentCount = presenceRegistry.size;
+    const name =
+        currentCount < FIXED_IDENTITIES.length
+            ? FIXED_IDENTITIES[currentCount]
+            : `Guest-${guestCounter++}`;
+
+    const now = new Date().toISOString();
+    const identity = {
+        userId: clientKey,
+        name,
+        status: 'offline',
+        sockets: new Set(),
+        firstSeen: now,
+        lastSeen: now,
+    };
+
+    presenceRegistry.set(clientKey, identity);
+    return identity;
+}
+
+function decodeContent(content) {
+    try {
+        const parsed = JSON.parse(content || '{}');
+        return {
+            objects: Array.isArray(parsed.objects) ? parsed.objects : [],
+            layers: Array.isArray(parsed.layers) ? parsed.layers : [],
+            activeLayerId: parsed.activeLayerId || null,
+        };
+    } catch (_err) {
+        return { objects: [], layers: [], activeLayerId: null };
+    }
+}
+
+function encodeContent(project) {
+    if (project.content) return project.content;
+    return JSON.stringify({
+        objects: Array.isArray(project.objects) ? project.objects : [],
+        layers: Array.isArray(project.layers) ? project.layers : [],
+        activeLayerId: project.activeLayerId || null,
+    });
+}
+
+// Compatibility endpoints for frontend project sync.
+app.get('/projects', async (_req, res) => {
+    try {
+        const projects = await Project.find({}).sort({ updatedAt: -1 });
+        res.status(200).json({
+            projects: projects.map((project) => ({
+                projectId: project.projectId,
+                name: project.name,
+                content: encodeContent(project),
+                lastModified: project.lastModified || project.updatedAt || new Date(),
+            })),
+        });
+    } catch (err) {
+        console.error('Error fetching /projects:', err);
+        res.status(500).json({ error: 'Error fetching projects' });
+    }
+});
+
+app.get('/projects/:projectId', async (req, res) => {
+    try {
+        const project = await Project.findOne({ projectId: req.params.projectId });
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+        return res.status(200).json({
+            project: {
+                projectId: project.projectId,
+                name: project.name,
+                content: encodeContent(project),
+                lastModified: project.lastModified || project.updatedAt || new Date(),
+            },
+        });
+    } catch (err) {
+        console.error('Error fetching /projects/:projectId:', err);
+        return res.status(500).json({ error: 'Error fetching project' });
+    }
+});
+
+app.put('/projects/:projectId', async (req, res) => {
+    const { name, content, lastModified } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const decoded = decodeContent(content || '{}');
+    try {
+        const project = await Project.findOneAndUpdate(
+            { projectId: req.params.projectId },
+            {
+                $set: {
+                    name,
+                    ownerEmail: 'shared',
+                    content: content || '{}',
+                    objects: decoded.objects,
+                    layers: decoded.layers,
+                    activeLayerId: decoded.activeLayerId,
+                    lastModified: lastModified ? new Date(lastModified) : new Date(),
+                    updatedAt: new Date(),
+                },
+            },
+            { upsert: true, new: true }
+        );
+
+        return res.status(200).json({
+            project: {
+                projectId: project.projectId,
+                name: project.name,
+                content: encodeContent(project),
+                lastModified: project.lastModified || project.updatedAt || new Date(),
+            },
+        });
+    } catch (err) {
+        console.error('Error saving /projects/:projectId:', err);
+        return res.status(500).json({ error: 'Error saving project' });
+    }
+});
+
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
+
+    socket.on('presence_register', ({ clientKey }) => {
+        if (!clientKey || typeof clientKey !== 'string') return;
+
+        const identity = assignIdentityForClient(clientKey);
+        identity.sockets.add(socket.id);
+        identity.status = 'online';
+        identity.lastSeen = new Date().toISOString();
+
+        socket.data.clientKey = clientKey;
+        socket.data.presenceName = identity.name;
+
+        socket.emit('presence_identity', {
+            userId: identity.userId,
+            name: identity.name,
+            status: identity.status,
+        });
+
+        broadcastPresence();
+    });
 
     socket.on('join_project', async ({ projectId, userId, username }) => {
         socket.join(projectId);
         socket.data.projectId = projectId;
-        socket.data.userId = userId;
-        socket.data.username = username || `User-${socket.id.slice(0, 4)}`;
+        socket.data.userId = userId || socket.data.clientKey || userId;
+        socket.data.username = socket.data.presenceName || username || `User-${socket.id.slice(0, 4)}`;
 
         console.log(`[Socket] User ${socket.data.username} joined room: ${projectId}`);
 
@@ -380,6 +541,16 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', async () => {
         const { projectId, userId, username } = socket.data;
+
+        const clientKey = socket.data?.clientKey;
+        if (clientKey && presenceRegistry.has(clientKey)) {
+            const identity = presenceRegistry.get(clientKey);
+            identity.sockets.delete(socket.id);
+            identity.status = identity.sockets.size > 0 ? 'online' : 'offline';
+            identity.lastSeen = new Date().toISOString();
+            broadcastPresence();
+        }
+
         if (projectId && userId) {
             console.log(`[Socket] User ${username || socket.id} disconnected from project ${projectId}`);
             
