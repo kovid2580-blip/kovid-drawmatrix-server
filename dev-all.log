@@ -1,0 +1,41 @@
+
+> workspace-root@1.0.0 dev
+> concurrently "npm run dev --prefix drawmatrix_reference" "npm run dev --prefix server"
+
+[1] 
+[1] > server@1.0.0 dev
+[1] > node --watch index.js
+[1] 
+[0] 
+[0] > drawmatrix@0.1.0 dev
+[0] > next dev --hostname 0.0.0.0 --port 3000
+[0] 
+[0]    ▲ Next.js 14.0.4
+[0]    - Local:        http://localhost:3000
+[0]    - Network:      http://0.0.0.0:3000
+[0]    - Environments: .env.local
+[0] 
+[1] [dotenv@17.2.4] injecting env (2) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[1] Restarting 'index.js'
+[1] [dotenv@17.2.4] injecting env (2) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+[1] Connected to MongoDB
+[1] Server running on port 3001
+[0]  ✓ Ready in 5.1s
+[0]  ○ Compiling / ...
+[0]  ✓ Compiled / in 27.7s (1364 modules)
+[0]  ✓ Compiled in 1430ms (672 modules)
+[1] Restarting 'index.js'
+[1] [dotenv@17.2.4] injecting env (2) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[1] Connected to MongoDB
+[1] Server running on port 3001
+[0]  ✓ Compiled in 3s (672 modules)
+[0]  ✓ Compiled in 882ms (672 modules)
+[0]  ✓ Compiled in 1332ms (672 modules)
+[0]  ✓ Compiled in 8.6s (672 modules)
+[1] Error: ENOENT: no such file or directory, stat 'C:\GIT HUB\major project\client\dist\index.html'
+[1] Failed running 'index.js'. Waiting for file changes before restarting...
+[0] [?25h
+[0] npm run dev --prefix drawmatrix_reference exited with code 0
+[1] ^C
+[1] npm run dev --prefix server exited with code 3221225786
+^C
