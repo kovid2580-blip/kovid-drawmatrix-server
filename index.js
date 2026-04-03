@@ -12,7 +12,10 @@ const server = http.createServer(app);
 
 const PORT = Number(process.env.PORT || 3001);
 const DATA_DIR = path.join(__dirname, "data");
-const DATA_FILE = path.join(DATA_DIR, "projects.json");
+const PROJECTS_FILE = path.join(DATA_DIR, "projects.json");
+const USERS_FILE = path.join(DATA_DIR, "users.json");
+const MESSAGES_FILE = path.join(DATA_DIR, "messages.json");
+const SCHEDULES_FILE = path.join(DATA_DIR, "schedules.json");
 
 const allowedOrigins = [
   process.env.FRONTEND_URL,
@@ -55,7 +58,6 @@ const io = new Server(server, {
 });
 
 const roomPresence = {};
-const roomMessages = {};
 const roomLocks = {};
 
 const ensureDataStore = () => {
@@ -63,27 +65,70 @@ const ensureDataStore = () => {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
 
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, "[]", "utf8");
-  }
+  [
+    [PROJECTS_FILE, []],
+    [USERS_FILE, []],
+    [MESSAGES_FILE, {}],
+    [SCHEDULES_FILE, []],
+  ].forEach(([filePath, initialValue]) => {
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, JSON.stringify(initialValue, null, 2), "utf8");
+    }
+  });
 };
 
-const readProjects = () => {
+const readJsonFile = (filePath, fallbackValue) => {
   ensureDataStore();
 
   try {
-    const raw = fs.readFileSync(DATA_FILE, "utf8");
+    const raw = fs.readFileSync(filePath, "utf8");
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return parsed;
   } catch (error) {
-    console.error("Failed to read projects.json:", error);
-    return [];
+    console.error(`Failed to read ${path.basename(filePath)}:`, error);
+    return fallbackValue;
   }
 };
 
-const writeProjects = (projects) => {
+const writeJsonFile = (filePath, value) => {
   ensureDataStore();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(projects, null, 2), "utf8");
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+};
+
+const readProjects = () => {
+  const parsed = readJsonFile(PROJECTS_FILE, []);
+  return Array.isArray(parsed) ? parsed : [];
+};
+
+const writeProjects = (projects) => {
+  writeJsonFile(PROJECTS_FILE, projects);
+};
+
+const readUsers = () => {
+  const parsed = readJsonFile(USERS_FILE, []);
+  return Array.isArray(parsed) ? parsed : [];
+};
+
+const writeUsers = (users) => {
+  writeJsonFile(USERS_FILE, users);
+};
+
+const readMessages = () => {
+  const parsed = readJsonFile(MESSAGES_FILE, {});
+  return parsed && typeof parsed === "object" ? parsed : {};
+};
+
+const writeMessages = (messages) => {
+  writeJsonFile(MESSAGES_FILE, messages);
+};
+
+const readSchedules = () => {
+  const parsed = readJsonFile(SCHEDULES_FILE, []);
+  return Array.isArray(parsed) ? parsed : [];
+};
+
+const writeSchedules = (schedules) => {
+  writeJsonFile(SCHEDULES_FILE, schedules);
 };
 
 const normalizeProject = (project = {}) => {
@@ -197,12 +242,115 @@ const parseSnapshot = (content) => {
   }
 };
 
+const listMessages = (projectId) => {
+  const allMessages = readMessages();
+  const projectMessages = allMessages[projectId];
+  return Array.isArray(projectMessages) ? projectMessages : [];
+};
+
+const saveMessage = (projectId, messageInput = {}) => {
+  const allMessages = readMessages();
+  const nextMessage = {
+    id:
+      messageInput.id ||
+      `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    user: messageInput.user || "System",
+    text: messageInput.text || "",
+    time:
+      messageInput.time ||
+      new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+  };
+
+  const existing = Array.isArray(allMessages[projectId])
+    ? allMessages[projectId]
+    : [];
+  allMessages[projectId] = [...existing, nextMessage].slice(-200);
+  writeMessages(allMessages);
+  return nextMessage;
+};
+
+const listSchedules = (projectId) => {
+  return readSchedules()
+    .filter((schedule) => !projectId || schedule.projectId === projectId)
+    .sort((a, b) => {
+      const aValue = `${a.date || ""}T${a.time || ""}`;
+      const bValue = `${b.date || ""}T${b.time || ""}`;
+      return aValue.localeCompare(bValue);
+    });
+};
+
+const saveSchedule = (scheduleInput = {}) => {
+  const schedules = readSchedules();
+  const schedule = {
+    _id:
+      scheduleInput._id ||
+      `sch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: scheduleInput.title || "Untitled Schedule",
+    date: scheduleInput.date || "",
+    time: scheduleInput.time || "",
+    type: scheduleInput.type || "Meeting",
+    projectId: scheduleInput.projectId || "",
+    createdBy: scheduleInput.createdBy || "guest",
+    createdAt: scheduleInput.createdAt || new Date().toISOString(),
+  };
+
+  schedules.push(schedule);
+  writeSchedules(schedules);
+  return schedule;
+};
+
+const deleteSchedule = (scheduleId) => {
+  const schedules = readSchedules();
+  const nextSchedules = schedules.filter((schedule) => schedule._id !== scheduleId);
+  if (nextSchedules.length === schedules.length) {
+    return false;
+  }
+
+  writeSchedules(nextSchedules);
+  return true;
+};
+
+const upsertUser = (userInput = {}) => {
+  if (!userInput.email) {
+    return null;
+  }
+
+  const users = readUsers();
+  const existingIndex = users.findIndex((user) => user.email === userInput.email);
+  const nextUser = {
+    _id:
+      existingIndex >= 0
+        ? users[existingIndex]._id
+        : `usr-${Math.random().toString(36).slice(2, 10)}`,
+    email: userInput.email,
+    username: userInput.username || userInput.email,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (existingIndex >= 0) {
+    users[existingIndex] = { ...users[existingIndex], ...nextUser };
+  } else {
+    users.push(nextUser);
+  }
+
+  writeUsers(users);
+  return nextUser;
+};
+
 const emitPresenceList = (projectId) => {
   io.to(projectId).emit("room_presence_list", roomPresence[projectId] || {});
 };
 
 app.get("/health", (_req, res) => {
-  res.status(200).json({ ok: true });
+  res.status(200).json({
+    ok: true,
+    projects: readProjects().length,
+    users: readUsers().length,
+    schedules: readSchedules().length,
+  });
 });
 
 app.get("/api/presence", (_req, res) => {
@@ -210,7 +358,59 @@ app.get("/api/presence", (_req, res) => {
 });
 
 app.get("/get-users", (_req, res) => {
-  res.status(200).json([]);
+  res.status(200).json(readUsers());
+});
+
+app.post("/upsert-user", (req, res) => {
+  const user = upsertUser(req.body || {});
+  if (!user) {
+    res.status(400).json({ error: "email is required" });
+    return;
+  }
+
+  res.status(200).json({ user });
+});
+
+app.get("/api/messages", (req, res) => {
+  const projectId = String(req.query.projectId || "");
+  res.status(200).json(listMessages(projectId));
+});
+
+app.post("/api/messages", (req, res) => {
+  const projectId = req.body?.projectId;
+  if (!projectId) {
+    res.status(400).json({ error: "projectId is required" });
+    return;
+  }
+
+  const message = saveMessage(projectId, req.body);
+  io.to(projectId).emit("receive_message", message);
+  res.status(201).json(message);
+});
+
+app.get("/api/schedules", (req, res) => {
+  const projectId = String(req.query.projectId || "");
+  res.status(200).json(listSchedules(projectId));
+});
+
+app.post("/api/schedules", (req, res) => {
+  if (!req.body?.projectId) {
+    res.status(400).json({ error: "projectId is required" });
+    return;
+  }
+
+  const schedule = saveSchedule(req.body);
+  res.status(201).json(schedule);
+});
+
+app.delete("/api/schedules/:scheduleId", (req, res) => {
+  const deleted = deleteSchedule(req.params.scheduleId);
+  if (!deleted) {
+    res.status(404).json({ error: "Schedule not found" });
+    return;
+  }
+
+  res.status(200).json({ ok: true });
 });
 
 app.get("/api/projects", (req, res) => {
@@ -299,8 +499,13 @@ app.delete("/api/projects/:projectId", (req, res) => {
   }
 
   delete roomPresence[req.params.projectId];
-  delete roomMessages[req.params.projectId];
   delete roomLocks[req.params.projectId];
+
+  const messages = readMessages();
+  if (messages[req.params.projectId]) {
+    delete messages[req.params.projectId];
+    writeMessages(messages);
+  }
 
   res.status(200).json({ ok: true });
 });
@@ -346,7 +551,7 @@ io.on("connection", (socket) => {
     });
 
     emitPresenceList(projectId);
-    socket.emit("message_history", roomMessages[projectId] || []);
+    socket.emit("message_history", listMessages(projectId));
   });
 
   socket.on("presence-update", ({ projectId, userId, presence }) => {
@@ -375,12 +580,8 @@ io.on("connection", (socket) => {
       return;
     }
 
-    if (!roomMessages[projectId]) {
-      roomMessages[projectId] = [];
-    }
-
-    roomMessages[projectId].push(message);
-    io.to(projectId).emit("receive_message", message);
+    const savedMessage = saveMessage(projectId, message);
+    io.to(projectId).emit("receive_message", savedMessage);
   });
 
   socket.on("create_object", ({ projectId, payload }) => {
