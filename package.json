@@ -1,15 +1,16 @@
 {
-    "name": "workspace-root",
-    "version": "1.0.0",
-    "private": true,
-    "scripts": {
-        "dev": "concurrently \"npm run dev --prefix drawmatrix_reference\" \"npm run dev --prefix server\"",
-        "frontend": "npm run dev --prefix drawmatrix_reference",
-        "backend": "npm run dev --prefix server",
-        "lint": "npm run lint --prefix drawmatrix_reference",
-        "format": "npx prettier --write ."
-    },
-    "devDependencies": {
-        "concurrently": "^9.2.1"
-    }
+  "name": "drawmatrix-server",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  }
 }
