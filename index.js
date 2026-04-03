@@ -227,6 +227,25 @@ const normalizeProject = (project = {}) => {
   };
 };
 
+const normalizeUser = (user = {}) => ({
+  _id:
+    typeof user._id === "string"
+      ? user._id
+      : user._id?.toString?.() ||
+        `usr-${Math.random().toString(36).slice(2, 10)}`,
+  email: user.email || "",
+  username: user.username || user.assignedName || "Guest User",
+  assignedName: user.assignedName || user.username || "Guest User",
+  status: user.status || "offline",
+  presenceKey: user.presenceKey || "",
+  userId: user.userId || user.presenceKey || user.email || "",
+  joinedOrder:
+    typeof user.joinedOrder === "number" ? user.joinedOrder : 999,
+  updatedAt: user.updatedAt || null,
+  lastSeenAt: user.lastSeenAt || null,
+  isGuest: Boolean(user.isGuest),
+});
+
 const listProjects = async (ownerEmail) => {
   if (usingMongo()) {
     const { projects } = getCollections();
@@ -545,7 +564,7 @@ const upsertUser = async (userInput = {}) => {
 const listUsers = async () => {
   if (usingMongo()) {
     const { users } = getCollections();
-    return users
+    const docs = await users
       .find({})
       .project({
         _id: 1,
@@ -562,9 +581,12 @@ const listUsers = async () => {
       })
       .sort({ joinedOrder: 1, createdAt: 1 })
       .toArray();
+    return docs.map(normalizeUser);
   }
 
-  return readUsers().sort((a, b) => (a.joinedOrder || 999) - (b.joinedOrder || 999));
+  return readUsers()
+    .map(normalizeUser)
+    .sort((a, b) => (a.joinedOrder || 999) - (b.joinedOrder || 999));
 };
 
 const assignReservedIdentity = (existingUsers) => {
@@ -636,10 +658,10 @@ const createUserRecord = async (userInput = {}) => {
         }
       );
 
-      return {
+      return normalizeUser({
         ...existingUser,
         ...updates,
-      };
+      });
     }
 
     const identity = assignReservedIdentity(existingUsers);
@@ -661,7 +683,7 @@ const createUserRecord = async (userInput = {}) => {
     };
 
     await users.insertOne(newUser);
-    return newUser;
+    return normalizeUser(newUser);
   }
 
   const users = readUsers();
@@ -686,7 +708,7 @@ const createUserRecord = async (userInput = {}) => {
     };
     users[existingIndex] = updatedUser;
     writeUsers(users);
-    return updatedUser;
+    return normalizeUser(updatedUser);
   }
 
   const identity = assignReservedIdentity(users);
@@ -707,7 +729,7 @@ const createUserRecord = async (userInput = {}) => {
   };
   users.push(newUser);
   writeUsers(users);
-  return newUser;
+  return normalizeUser(newUser);
 };
 
 const setUserStatus = async ({ presenceKey, email, userId, status }) => {
@@ -744,7 +766,7 @@ const setUserStatus = async ({ presenceKey, email, userId, status }) => {
         },
       }
     );
-    return updated;
+    return normalizeUser(updated);
   }
 
   const users = readUsers();
@@ -764,7 +786,7 @@ const setUserStatus = async ({ presenceKey, email, userId, status }) => {
     lastSeenAt: now,
   };
   writeUsers(users);
-  return users[index];
+  return normalizeUser(users[index]);
 };
 
 const emitPresenceList = (projectId) => {
