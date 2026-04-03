@@ -1,7 +1,0 @@
-
-> server@1.0.0 dev
-> node --watch index.js
-
-[dotenv@17.2.4] injecting env (2) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
-Connected to MongoDB
-Server running on port 3001

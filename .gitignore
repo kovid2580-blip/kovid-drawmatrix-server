@@ -22,6 +22,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+backend-dev.log
+dev-all.log
+frontend-dev.log
+server-dev-sync.log
+server-presence.log
+ngrok_url.txt
 
 # Editor directories
 .vscode/
@@ -35,3 +41,4 @@ Thumbs.db
 
 # Local persistence
 data/
+tmp/
