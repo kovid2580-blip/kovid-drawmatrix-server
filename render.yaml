@@ -3,7 +3,19 @@ services:
     name: kovid-drawmatrix-server
     env: node
     plan: free
-    rootDir: server
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: REQUIRE_MONGODB
+        value: "true"
+      - key: MONGODB_DB
+        value: drawmatrix
+      - key: FRONTEND_URL
+        value: https://drawmatrixreference.vercel.app
+      - key: NEXT_PUBLIC_APP_URL
+        value: https://drawmatrixreference.vercel.app
+      - key: MONGODB_URI
+        sync: false

@@ -14,6 +14,12 @@ const server = http.createServer(app);
 const PORT = Number(process.env.PORT || 3001);
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "drawmatrix";
+const IS_RENDER =
+  Boolean(process.env.RENDER) || Boolean(process.env.RENDER_SERVICE_ID);
+const REQUIRE_MONGODB =
+  process.env.REQUIRE_MONGODB === "true" ||
+  process.env.NODE_ENV === "production" ||
+  IS_RENDER;
 const DATA_DIR = path.join(__dirname, "data");
 const PROJECTS_FILE = path.join(DATA_DIR, "projects.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
@@ -64,6 +70,7 @@ const roomPresence = {};
 const roomLocks = {};
 let mongoClient = null;
 let mongoDb = null;
+let mongoConnectionError = null;
 
 const ensureDataStore = () => {
   if (!fs.existsSync(DATA_DIR)) {
@@ -137,20 +144,46 @@ const writeSchedules = (schedules) => {
 };
 
 const connectMongo = async () => {
-  if (!MONGODB_URI || mongoDb) {
+  if (mongoDb) {
     return mongoDb;
   }
 
+  if (!MONGODB_URI) {
+    const missingUriError = new Error(
+      "MongoDB Atlas is required, but MONGODB_URI is not set."
+    );
+
+    if (REQUIRE_MONGODB) {
+      mongoConnectionError = missingUriError;
+      throw missingUriError;
+    }
+
+    mongoConnectionError = null;
+    console.warn("MONGODB_URI is not set. Falling back to JSON storage for local development.");
+    return null;
+  }
+
   try {
-    mongoClient = new MongoClient(MONGODB_URI);
+    mongoClient = new MongoClient(MONGODB_URI, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+    });
     await mongoClient.connect();
     mongoDb = mongoClient.db(MONGODB_DB);
+    mongoConnectionError = null;
     console.log(`MongoDB connected to database "${MONGODB_DB}"`);
     return mongoDb;
   } catch (error) {
-    console.error("MongoDB connection failed, falling back to JSON storage:", error);
+    mongoConnectionError = error;
     mongoClient = null;
     mongoDb = null;
+
+    if (REQUIRE_MONGODB) {
+      throw error;
+    }
+
+    console.error("MongoDB connection failed, falling back to JSON storage:", error);
     return null;
   }
 };
@@ -531,11 +564,19 @@ app.get("/health", async (_req, res) => {
     listSchedules(),
   ]);
 
-  res.status(200).json({
-    ok: true,
+  const mongoConnected = usingMongo();
+  const healthy = !REQUIRE_MONGODB || mongoConnected;
+
+  res.status(healthy ? 200 : 503).json({
+    ok: healthy,
+    requiredStorage: REQUIRE_MONGODB ? "mongo" : "json-or-mongo",
     storage: usingMongo() ? "mongo" : "json",
     mongoConfigured: Boolean(MONGODB_URI),
-    mongoConnected: usingMongo(),
+    mongoConnected,
+    mongoError:
+      REQUIRE_MONGODB && mongoConnectionError
+        ? mongoConnectionError.message
+        : null,
     projects: projects.length,
     users: users.length,
     schedules: schedules.length,
@@ -944,11 +985,18 @@ server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
 const startServer = async () => {
-  ensureDataStore();
+  if (!REQUIRE_MONGODB) {
+    ensureDataStore();
+  }
+
   await connectMongo();
 
   server.listen(PORT, () => {
-    console.log(`DrawMatrix server listening on port ${PORT}`);
+    console.log(
+      `DrawMatrix server listening on port ${PORT} using ${
+        usingMongo() ? "MongoDB Atlas" : "JSON storage"
+      }`
+    );
   });
 };
 
