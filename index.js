@@ -71,6 +71,7 @@ const roomLocks = {};
 let mongoClient = null;
 let mongoDb = null;
 let mongoConnectionError = null;
+const RESERVED_USER_NAMES = ["Kovid", "Vedanth", "Mohith"];
 
 const ensureDataStore = () => {
   if (!fs.existsSync(DATA_DIR)) {
@@ -546,11 +547,224 @@ const listUsers = async () => {
     const { users } = getCollections();
     return users
       .find({})
-      .project({ _id: 1, email: 1, username: 1, updatedAt: 1 })
+      .project({
+        _id: 1,
+        email: 1,
+        username: 1,
+        assignedName: 1,
+        status: 1,
+        presenceKey: 1,
+        userId: 1,
+        joinedOrder: 1,
+        updatedAt: 1,
+        lastSeenAt: 1,
+        isGuest: 1,
+      })
+      .sort({ joinedOrder: 1, createdAt: 1 })
       .toArray();
   }
 
-  return readUsers();
+  return readUsers().sort((a, b) => (a.joinedOrder || 999) - (b.joinedOrder || 999));
+};
+
+const assignReservedIdentity = (existingUsers) => {
+  const taken = new Set(
+    existingUsers
+      .map((user) => user.assignedName || user.username)
+      .filter(Boolean)
+  );
+
+  const reserved = RESERVED_USER_NAMES.find((name) => !taken.has(name));
+  if (reserved) {
+    return { assignedName: reserved, isGuest: false };
+  }
+
+  const guestNumbers = existingUsers
+    .map((user) => {
+      const candidate = user.assignedName || user.username || "";
+      const match = /^Guest-(\d+)$/.exec(candidate);
+      return match ? Number(match[1]) : null;
+    })
+    .filter((value) => typeof value === "number");
+  const nextGuestNumber =
+    guestNumbers.length > 0 ? Math.max(...guestNumbers) + 1 : 1;
+
+  return {
+    assignedName: `Guest-${nextGuestNumber}`,
+    isGuest: true,
+  };
+};
+
+const createUserRecord = async (userInput = {}) => {
+  const presenceKey = String(userInput.presenceKey || "").trim();
+  const email = String(userInput.email || "").trim();
+  const requestedUsername = String(userInput.username || "").trim();
+
+  if (!presenceKey && !email) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+
+  if (usingMongo()) {
+    const { users } = getCollections();
+    const existingUsers = await users.find({}).sort({ joinedOrder: 1 }).toArray();
+    const existingUser =
+      (email && existingUsers.find((user) => user.email === email)) ||
+      (presenceKey &&
+        existingUsers.find((user) => user.presenceKey === presenceKey));
+
+    if (existingUser) {
+      const updates = {
+        email: email || existingUser.email || "",
+        presenceKey: presenceKey || existingUser.presenceKey || "",
+        userId:
+          existingUser.userId ||
+          presenceKey ||
+          email ||
+          `usr-${Math.random().toString(36).slice(2, 10)}`,
+        updatedAt: now,
+      };
+
+      await users.updateOne(
+        { _id: existingUser._id },
+        {
+          $set: updates,
+          $setOnInsert: {
+            createdAt: now,
+          },
+        }
+      );
+
+      return {
+        ...existingUser,
+        ...updates,
+      };
+    }
+
+    const identity = assignReservedIdentity(existingUsers);
+    const joinedOrder = existingUsers.length + 1;
+    const newUser = {
+      _id: `usr-${Math.random().toString(36).slice(2, 10)}`,
+      email,
+      presenceKey,
+      userId:
+        presenceKey || email || `usr-${Math.random().toString(36).slice(2, 10)}`,
+      username: identity.assignedName,
+      assignedName: identity.assignedName,
+      status: "offline",
+      isGuest: identity.isGuest,
+      joinedOrder,
+      createdAt: now,
+      updatedAt: now,
+      lastSeenAt: now,
+    };
+
+    await users.insertOne(newUser);
+    return newUser;
+  }
+
+  const users = readUsers();
+  const existingIndex = users.findIndex(
+    (user) =>
+      (email && user.email === email) ||
+      (presenceKey && user.presenceKey === presenceKey)
+  );
+
+  if (existingIndex >= 0) {
+    const existingUser = users[existingIndex];
+    const updatedUser = {
+      ...existingUser,
+      email: email || existingUser.email || "",
+      presenceKey: presenceKey || existingUser.presenceKey || "",
+      userId:
+        existingUser.userId ||
+        presenceKey ||
+        email ||
+        `usr-${Math.random().toString(36).slice(2, 10)}`,
+      updatedAt: now,
+    };
+    users[existingIndex] = updatedUser;
+    writeUsers(users);
+    return updatedUser;
+  }
+
+  const identity = assignReservedIdentity(users);
+  const newUser = {
+    _id: `usr-${Math.random().toString(36).slice(2, 10)}`,
+    email,
+    presenceKey,
+    userId:
+      presenceKey || email || `usr-${Math.random().toString(36).slice(2, 10)}`,
+    username: identity.assignedName,
+    assignedName: identity.assignedName,
+    status: "offline",
+    isGuest: identity.isGuest,
+    joinedOrder: users.length + 1,
+    createdAt: now,
+    updatedAt: now,
+    lastSeenAt: now,
+  };
+  users.push(newUser);
+  writeUsers(users);
+  return newUser;
+};
+
+const setUserStatus = async ({ presenceKey, email, userId, status }) => {
+  const now = new Date().toISOString();
+
+  if (usingMongo()) {
+    const { users } = getCollections();
+    const match = [];
+    if (presenceKey) match.push({ presenceKey });
+    if (email) match.push({ email });
+    if (userId) match.push({ userId });
+    if (match.length === 0) {
+      return null;
+    }
+
+    const user = await users.findOne({ $or: match });
+    if (!user) {
+      return null;
+    }
+
+    const updated = {
+      ...user,
+      status,
+      updatedAt: now,
+      lastSeenAt: now,
+    };
+    await users.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          status,
+          updatedAt: now,
+          lastSeenAt: now,
+        },
+      }
+    );
+    return updated;
+  }
+
+  const users = readUsers();
+  const index = users.findIndex(
+    (user) =>
+      (presenceKey && user.presenceKey === presenceKey) ||
+      (email && user.email === email) ||
+      (userId && user.userId === userId)
+  );
+  if (index < 0) {
+    return null;
+  }
+  users[index] = {
+    ...users[index],
+    status,
+    updatedAt: now,
+    lastSeenAt: now,
+  };
+  writeUsers(users);
+  return users[index];
 };
 
 const emitPresenceList = (projectId) => {
@@ -592,9 +806,9 @@ app.get("/get-users", async (_req, res) => {
 });
 
 app.post("/upsert-user", async (req, res) => {
-  const user = await upsertUser(req.body || {});
+  const user = await createUserRecord(req.body || {});
   if (!user) {
-    res.status(400).json({ error: "email is required" });
+    res.status(400).json({ error: "presenceKey or email is required" });
     return;
   }
 
@@ -747,14 +961,40 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const presenceKey =
+      typeof payload === "object" ? String(payload?.presenceKey || "") : "";
+    const email =
+      typeof payload === "object" ? String(payload?.email || "") : "";
+    const knownUser =
+      (await createUserRecord({
+        presenceKey,
+        email,
+        username: typeof payload === "object" ? payload?.username : "",
+      })) || {};
     const userId =
-      (typeof payload === "object" && payload?.userId) || socket.id;
+      knownUser.userId ||
+      (typeof payload === "object" && payload?.userId) ||
+      presenceKey ||
+      email ||
+      socket.id;
     const username =
-      (typeof payload === "object" && payload?.username) || "Guest";
+      knownUser.assignedName ||
+      knownUser.username ||
+      (typeof payload === "object" && payload?.username) ||
+      "Guest";
 
     socket.join(projectId);
     socket.data.projectId = projectId;
     socket.data.userId = userId;
+    socket.data.presenceKey = presenceKey || knownUser.presenceKey || "";
+    socket.data.email = email || knownUser.email || "";
+
+    await setUserStatus({
+      presenceKey: socket.data.presenceKey,
+      email: socket.data.email,
+      userId,
+      status: "online",
+    });
 
     if (!roomPresence[projectId]) {
       roomPresence[projectId] = {};
@@ -767,6 +1007,7 @@ io.on("connection", (socket) => {
       color: "#38bdf8",
       cursor: null,
       cameraPosition: [0, 0, 0],
+      status: "online",
     };
 
     const project =
@@ -800,6 +1041,7 @@ io.on("connection", (socket) => {
       ...presence,
       id: userId,
       userId,
+      status: "online",
     };
 
     io.to(projectId).emit("presence-update", { userId, presence: roomPresence[projectId][userId] });
@@ -970,7 +1212,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    const { projectId, userId } = socket.data || {};
+    const { projectId, userId, presenceKey, email } = socket.data || {};
 
     if (projectId && userId && roomPresence[projectId]) {
       delete roomPresence[projectId][userId];
@@ -978,6 +1220,13 @@ io.on("connection", (socket) => {
       io.to(projectId).emit("unlock_all_by_user", { userId });
       emitPresenceList(projectId);
     }
+
+    void setUserStatus({
+      presenceKey,
+      email,
+      userId,
+      status: "offline",
+    });
   });
 });
 
