@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: kovid-drawmatrix-server
+    env: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health

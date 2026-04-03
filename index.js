@@ -6,11 +6,14 @@ const http = require("http");
 const express = require("express");
 const cors = require("cors");
 const { Server } = require("socket.io");
+const { MongoClient } = require("mongodb");
 
 const app = express();
 const server = http.createServer(app);
 
 const PORT = Number(process.env.PORT || 3001);
+const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_DB = process.env.MONGODB_DB || "drawmatrix";
 const DATA_DIR = path.join(__dirname, "data");
 const PROJECTS_FILE = path.join(DATA_DIR, "projects.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
@@ -59,6 +62,8 @@ const io = new Server(server, {
 
 const roomPresence = {};
 const roomLocks = {};
+let mongoClient = null;
+let mongoDb = null;
 
 const ensureDataStore = () => {
   if (!fs.existsSync(DATA_DIR)) {
@@ -131,6 +136,40 @@ const writeSchedules = (schedules) => {
   writeJsonFile(SCHEDULES_FILE, schedules);
 };
 
+const connectMongo = async () => {
+  if (!MONGODB_URI || mongoDb) {
+    return mongoDb;
+  }
+
+  try {
+    mongoClient = new MongoClient(MONGODB_URI);
+    await mongoClient.connect();
+    mongoDb = mongoClient.db(MONGODB_DB);
+    console.log(`MongoDB connected to database "${MONGODB_DB}"`);
+    return mongoDb;
+  } catch (error) {
+    console.error("MongoDB connection failed, falling back to JSON storage:", error);
+    mongoClient = null;
+    mongoDb = null;
+    return null;
+  }
+};
+
+const usingMongo = () => Boolean(mongoDb);
+
+const getCollections = () => {
+  if (!mongoDb) {
+    return null;
+  }
+
+  return {
+    projects: mongoDb.collection("projects"),
+    users: mongoDb.collection("users"),
+    messages: mongoDb.collection("messages"),
+    schedules: mongoDb.collection("schedules"),
+  };
+};
+
 const normalizeProject = (project = {}) => {
   const now = new Date().toISOString();
 
@@ -154,7 +193,17 @@ const normalizeProject = (project = {}) => {
   };
 };
 
-const listProjects = (ownerEmail) => {
+const listProjects = async (ownerEmail) => {
+  if (usingMongo()) {
+    const { projects } = getCollections();
+    const docs = await projects.find(ownerEmail ? { ownerEmail } : {}).toArray();
+    return docs.map(normalizeProject).sort(
+      (a, b) =>
+        new Date(b.lastModified || b.updatedAt).getTime() -
+        new Date(a.lastModified || a.updatedAt).getTime()
+    );
+  }
+
   const projects = readProjects().map(normalizeProject);
   const filtered = ownerEmail
     ? projects.filter((project) => project.ownerEmail === ownerEmail)
@@ -167,18 +216,44 @@ const listProjects = (ownerEmail) => {
   );
 };
 
-const getProject = (projectId) => {
+const getProject = async (projectId) => {
+  if (usingMongo()) {
+    const { projects } = getCollections();
+    const doc = await projects.findOne({ projectId });
+    return doc ? normalizeProject(doc) : null;
+  }
+
   return readProjects().map(normalizeProject).find((project) => project.projectId === projectId) || null;
 };
 
-const saveProjectRecord = (projectInput) => {
+const saveProjectRecord = async (projectInput) => {
   const incoming = normalizeProject(projectInput);
+  const now = new Date().toISOString();
+
+  if (usingMongo()) {
+    const { projects } = getCollections();
+    const existing = await projects.findOne({ projectId: incoming.projectId });
+    const merged = normalizeProject({
+      ...existing,
+      ...incoming,
+      createdAt: existing?.createdAt || incoming.createdAt || now,
+      updatedAt: now,
+      lastModified: incoming.lastModified || now,
+    });
+
+    await projects.updateOne(
+      { projectId: incoming.projectId },
+      { $set: merged },
+      { upsert: true }
+    );
+
+    return merged;
+  }
+
   const projects = readProjects().map(normalizeProject);
   const existingIndex = projects.findIndex(
     (project) => project.projectId === incoming.projectId
   );
-  const now = new Date().toISOString();
-
   const existing = existingIndex >= 0 ? projects[existingIndex] : null;
   const merged = normalizeProject({
     ...existing,
@@ -198,7 +273,19 @@ const saveProjectRecord = (projectInput) => {
   return merged;
 };
 
-const deleteProjectRecord = (projectId) => {
+const deleteProjectRecord = async (projectId) => {
+  if (usingMongo()) {
+    const { projects, messages, schedules } = getCollections();
+    const result = await projects.deleteOne({ projectId });
+    if (!result.deletedCount) {
+      return false;
+    }
+
+    await messages.deleteMany({ projectId });
+    await schedules.deleteMany({ projectId });
+    return true;
+  }
+
   const projects = readProjects().map(normalizeProject);
   const nextProjects = projects.filter((project) => project.projectId !== projectId);
 
@@ -210,8 +297,8 @@ const deleteProjectRecord = (projectId) => {
   return true;
 };
 
-const patchProjectRecord = (projectId, updates) => {
-  const existing = getProject(projectId);
+const patchProjectRecord = async (projectId, updates) => {
+  const existing = await getProject(projectId);
   if (!existing) {
     return null;
   }
@@ -242,18 +329,28 @@ const parseSnapshot = (content) => {
   }
 };
 
-const listMessages = (projectId) => {
+const listMessages = async (projectId) => {
+  if (usingMongo()) {
+    const { messages } = getCollections();
+    return messages
+      .find({ projectId })
+      .sort({ createdAt: 1 })
+      .limit(200)
+      .project({ _id: 0, id: 1, user: 1, text: 1, time: 1 })
+      .toArray();
+  }
+
   const allMessages = readMessages();
   const projectMessages = allMessages[projectId];
   return Array.isArray(projectMessages) ? projectMessages : [];
 };
 
-const saveMessage = (projectId, messageInput = {}) => {
-  const allMessages = readMessages();
+const saveMessage = async (projectId, messageInput = {}) => {
   const nextMessage = {
     id:
       messageInput.id ||
       `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    projectId,
     user: messageInput.user || "System",
     text: messageInput.text || "",
     time:
@@ -262,17 +359,52 @@ const saveMessage = (projectId, messageInput = {}) => {
         hour: "2-digit",
         minute: "2-digit",
       }),
+    createdAt: new Date().toISOString(),
   };
 
+  if (usingMongo()) {
+    const { messages } = getCollections();
+    await messages.insertOne(nextMessage);
+    return {
+      id: nextMessage.id,
+      user: nextMessage.user,
+      text: nextMessage.text,
+      time: nextMessage.time,
+    };
+  }
+
+  const allMessages = readMessages();
   const existing = Array.isArray(allMessages[projectId])
     ? allMessages[projectId]
     : [];
-  allMessages[projectId] = [...existing, nextMessage].slice(-200);
+  allMessages[projectId] = [
+    ...existing,
+    {
+      id: nextMessage.id,
+      user: nextMessage.user,
+      text: nextMessage.text,
+      time: nextMessage.time,
+    },
+  ].slice(-200);
   writeMessages(allMessages);
-  return nextMessage;
+  return {
+    id: nextMessage.id,
+    user: nextMessage.user,
+    text: nextMessage.text,
+    time: nextMessage.time,
+  };
 };
 
-const listSchedules = (projectId) => {
+const listSchedules = async (projectId) => {
+  if (usingMongo()) {
+    const { schedules } = getCollections();
+    return schedules
+      .find(projectId ? { projectId } : {})
+      .sort({ date: 1, time: 1 })
+      .project({ _id: 0 })
+      .toArray();
+  }
+
   return readSchedules()
     .filter((schedule) => !projectId || schedule.projectId === projectId)
     .sort((a, b) => {
@@ -282,8 +414,7 @@ const listSchedules = (projectId) => {
     });
 };
 
-const saveSchedule = (scheduleInput = {}) => {
-  const schedules = readSchedules();
+const saveSchedule = async (scheduleInput = {}) => {
   const schedule = {
     _id:
       scheduleInput._id ||
@@ -297,12 +428,25 @@ const saveSchedule = (scheduleInput = {}) => {
     createdAt: scheduleInput.createdAt || new Date().toISOString(),
   };
 
+  if (usingMongo()) {
+    const { schedules } = getCollections();
+    await schedules.insertOne(schedule);
+    return schedule;
+  }
+
+  const schedules = readSchedules();
   schedules.push(schedule);
   writeSchedules(schedules);
   return schedule;
 };
 
-const deleteSchedule = (scheduleId) => {
+const deleteSchedule = async (scheduleId) => {
+  if (usingMongo()) {
+    const { schedules } = getCollections();
+    const result = await schedules.deleteOne({ _id: scheduleId });
+    return Boolean(result.deletedCount);
+  }
+
   const schedules = readSchedules();
   const nextSchedules = schedules.filter((schedule) => schedule._id !== scheduleId);
   if (nextSchedules.length === schedules.length) {
@@ -313,43 +457,88 @@ const deleteSchedule = (scheduleId) => {
   return true;
 };
 
-const upsertUser = (userInput = {}) => {
+const upsertUser = async (userInput = {}) => {
   if (!userInput.email) {
     return null;
   }
 
-  const users = readUsers();
-  const existingIndex = users.findIndex((user) => user.email === userInput.email);
   const nextUser = {
-    _id:
-      existingIndex >= 0
-        ? users[existingIndex]._id
-        : `usr-${Math.random().toString(36).slice(2, 10)}`,
     email: userInput.email,
     username: userInput.username || userInput.email,
     updatedAt: new Date().toISOString(),
   };
 
+  if (usingMongo()) {
+    const { users } = getCollections();
+    await users.updateOne(
+      { email: userInput.email },
+      {
+        $set: nextUser,
+        $setOnInsert: {
+          _id: `usr-${Math.random().toString(36).slice(2, 10)}`,
+        },
+      },
+      { upsert: true }
+    );
+
+    const user = await users.findOne(
+      { email: userInput.email },
+      { projection: { _id: 1, email: 1, username: 1, updatedAt: 1 } }
+    );
+    return user;
+  }
+
+  const users = readUsers();
+  const existingIndex = users.findIndex((user) => user.email === userInput.email);
+  const finalUser = {
+    _id:
+      existingIndex >= 0
+        ? users[existingIndex]._id
+        : `usr-${Math.random().toString(36).slice(2, 10)}`,
+    ...nextUser,
+  };
+
   if (existingIndex >= 0) {
-    users[existingIndex] = { ...users[existingIndex], ...nextUser };
+    users[existingIndex] = { ...users[existingIndex], ...finalUser };
   } else {
-    users.push(nextUser);
+    users.push(finalUser);
   }
 
   writeUsers(users);
-  return nextUser;
+  return finalUser;
+};
+
+const listUsers = async () => {
+  if (usingMongo()) {
+    const { users } = getCollections();
+    return users
+      .find({})
+      .project({ _id: 1, email: 1, username: 1, updatedAt: 1 })
+      .toArray();
+  }
+
+  return readUsers();
 };
 
 const emitPresenceList = (projectId) => {
   io.to(projectId).emit("room_presence_list", roomPresence[projectId] || {});
 };
 
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
+  const [projects, users, schedules] = await Promise.all([
+    listProjects(),
+    listUsers(),
+    listSchedules(),
+  ]);
+
   res.status(200).json({
     ok: true,
-    projects: readProjects().length,
-    users: readUsers().length,
-    schedules: readSchedules().length,
+    storage: usingMongo() ? "mongo" : "json",
+    mongoConfigured: Boolean(MONGODB_URI),
+    mongoConnected: usingMongo(),
+    projects: projects.length,
+    users: users.length,
+    schedules: schedules.length,
   });
 });
 
@@ -357,12 +546,12 @@ app.get("/api/presence", (_req, res) => {
   res.status(200).json(roomPresence);
 });
 
-app.get("/get-users", (_req, res) => {
-  res.status(200).json(readUsers());
+app.get("/get-users", async (_req, res) => {
+  res.status(200).json(await listUsers());
 });
 
-app.post("/upsert-user", (req, res) => {
-  const user = upsertUser(req.body || {});
+app.post("/upsert-user", async (req, res) => {
+  const user = await upsertUser(req.body || {});
   if (!user) {
     res.status(400).json({ error: "email is required" });
     return;
@@ -371,40 +560,40 @@ app.post("/upsert-user", (req, res) => {
   res.status(200).json({ user });
 });
 
-app.get("/api/messages", (req, res) => {
+app.get("/api/messages", async (req, res) => {
   const projectId = String(req.query.projectId || "");
-  res.status(200).json(listMessages(projectId));
+  res.status(200).json(await listMessages(projectId));
 });
 
-app.post("/api/messages", (req, res) => {
+app.post("/api/messages", async (req, res) => {
   const projectId = req.body?.projectId;
   if (!projectId) {
     res.status(400).json({ error: "projectId is required" });
     return;
   }
 
-  const message = saveMessage(projectId, req.body);
+  const message = await saveMessage(projectId, req.body);
   io.to(projectId).emit("receive_message", message);
   res.status(201).json(message);
 });
 
-app.get("/api/schedules", (req, res) => {
+app.get("/api/schedules", async (req, res) => {
   const projectId = String(req.query.projectId || "");
-  res.status(200).json(listSchedules(projectId));
+  res.status(200).json(await listSchedules(projectId));
 });
 
-app.post("/api/schedules", (req, res) => {
+app.post("/api/schedules", async (req, res) => {
   if (!req.body?.projectId) {
     res.status(400).json({ error: "projectId is required" });
     return;
   }
 
-  const schedule = saveSchedule(req.body);
+  const schedule = await saveSchedule(req.body);
   res.status(201).json(schedule);
 });
 
-app.delete("/api/schedules/:scheduleId", (req, res) => {
-  const deleted = deleteSchedule(req.params.scheduleId);
+app.delete("/api/schedules/:scheduleId", async (req, res) => {
+  const deleted = await deleteSchedule(req.params.scheduleId);
   if (!deleted) {
     res.status(404).json({ error: "Schedule not found" });
     return;
@@ -413,18 +602,18 @@ app.delete("/api/schedules/:scheduleId", (req, res) => {
   res.status(200).json({ ok: true });
 });
 
-app.get("/api/projects", (req, res) => {
-  const projects = listProjects(req.query.ownerEmail);
+app.get("/api/projects", async (req, res) => {
+  const projects = await listProjects(req.query.ownerEmail);
   res.status(200).json(projects);
 });
 
-app.get("/projects", (req, res) => {
-  const projects = listProjects(req.query.ownerEmail);
+app.get("/projects", async (req, res) => {
+  const projects = await listProjects(req.query.ownerEmail);
   res.status(200).json({ projects });
 });
 
-app.get("/api/projects/:projectId", (req, res) => {
-  const project = getProject(req.params.projectId);
+app.get("/api/projects/:projectId", async (req, res) => {
+  const project = await getProject(req.params.projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -433,8 +622,8 @@ app.get("/api/projects/:projectId", (req, res) => {
   res.status(200).json(project);
 });
 
-app.get("/projects/:projectId", (req, res) => {
-  const project = getProject(req.params.projectId);
+app.get("/projects/:projectId", async (req, res) => {
+  const project = await getProject(req.params.projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -443,11 +632,11 @@ app.get("/projects/:projectId", (req, res) => {
   res.status(200).json({ project });
 });
 
-app.post("/api/projects/save", (req, res) => {
+app.post("/api/projects/save", async (req, res) => {
   const payload = req.body || {};
   const snapshot = parseSnapshot(payload.objects || payload.content);
 
-  const project = saveProjectRecord({
+  const project = await saveProjectRecord({
     projectId: payload.projectId,
     name: payload.name,
     ownerEmail: payload.ownerEmail,
@@ -461,11 +650,11 @@ app.post("/api/projects/save", (req, res) => {
   res.status(200).json({ project });
 });
 
-app.put("/api/projects/:projectId", (req, res) => {
+app.put("/api/projects/:projectId", async (req, res) => {
   const payload = req.body || {};
   const snapshot = parseSnapshot(payload.content);
 
-  const project = saveProjectRecord({
+  const project = await saveProjectRecord({
     projectId: req.params.projectId,
     name: payload.name,
     ownerEmail: payload.ownerEmail,
@@ -478,8 +667,8 @@ app.put("/api/projects/:projectId", (req, res) => {
   res.status(200).json({ project });
 });
 
-app.patch("/api/projects/:projectId", (req, res) => {
-  const project = patchProjectRecord(req.params.projectId, {
+app.patch("/api/projects/:projectId", async (req, res) => {
+  const project = await patchProjectRecord(req.params.projectId, {
     name: req.body?.name,
   });
 
@@ -491,8 +680,8 @@ app.patch("/api/projects/:projectId", (req, res) => {
   res.status(200).json({ project });
 });
 
-app.delete("/api/projects/:projectId", (req, res) => {
-  const deleted = deleteProjectRecord(req.params.projectId);
+app.delete("/api/projects/:projectId", async (req, res) => {
+  const deleted = await deleteProjectRecord(req.params.projectId);
   if (!deleted) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -511,7 +700,7 @@ app.delete("/api/projects/:projectId", (req, res) => {
 });
 
 io.on("connection", (socket) => {
-  socket.on("join_project", (payload) => {
+  socket.on("join_project", async (payload) => {
     const projectId = typeof payload === "string" ? payload : payload?.projectId;
     if (!projectId) {
       return;
@@ -539,7 +728,9 @@ io.on("connection", (socket) => {
       cameraPosition: [0, 0, 0],
     };
 
-    const project = getProject(projectId) || saveProjectRecord({ projectId, name: "Untitled Sheet" });
+    const project =
+      (await getProject(projectId)) ||
+      (await saveProjectRecord({ projectId, name: "Untitled Sheet" }));
     const snapshot = parseSnapshot(project.content);
 
     socket.emit("load_project", {
@@ -551,7 +742,7 @@ io.on("connection", (socket) => {
     });
 
     emitPresenceList(projectId);
-    socket.emit("message_history", listMessages(projectId));
+    socket.emit("message_history", await listMessages(projectId));
   });
 
   socket.on("presence-update", ({ projectId, userId, presence }) => {
@@ -574,26 +765,28 @@ io.on("connection", (socket) => {
     emitPresenceList(projectId);
   });
 
-  socket.on("send_message", (message) => {
+  socket.on("send_message", async (message) => {
     const projectId = message?.projectId || socket.data.projectId;
     if (!projectId) {
       return;
     }
 
-    const savedMessage = saveMessage(projectId, message);
+    const savedMessage = await saveMessage(projectId, message);
     io.to(projectId).emit("receive_message", savedMessage);
   });
 
-  socket.on("create_object", ({ projectId, payload }) => {
+  socket.on("create_object", async ({ projectId, payload }) => {
     if (!projectId || !payload) {
       return;
     }
 
-    const project = getProject(projectId) || saveProjectRecord({ projectId, name: "Untitled Sheet" });
+    const project =
+      (await getProject(projectId)) ||
+      (await saveProjectRecord({ projectId, name: "Untitled Sheet" }));
     const snapshot = parseSnapshot(project.content);
     snapshot.objects.push(payload);
 
-    saveProjectRecord({
+    await saveProjectRecord({
       ...project,
       projectId,
       content: JSON.stringify({
@@ -608,12 +801,12 @@ io.on("connection", (socket) => {
     socket.to(projectId).emit("create_object", { payload });
   });
 
-  socket.on("delete_object", ({ projectId, objectId }) => {
+  socket.on("delete_object", async ({ projectId, objectId }) => {
     if (!projectId || !objectId) {
       return;
     }
 
-    const project = getProject(projectId);
+    const project = await getProject(projectId);
     if (!project) {
       return;
     }
@@ -621,7 +814,7 @@ io.on("connection", (socket) => {
     const snapshot = parseSnapshot(project.content);
     snapshot.objects = snapshot.objects.filter((object) => object.id !== objectId);
 
-    saveProjectRecord({
+    await saveProjectRecord({
       ...project,
       content: JSON.stringify(snapshot),
       objects: snapshot.objects,
@@ -631,12 +824,12 @@ io.on("connection", (socket) => {
     io.to(projectId).emit("delete_object", { objectId });
   });
 
-  socket.on("transform_object", ({ projectId, objectId, payload }) => {
+  socket.on("transform_object", async ({ projectId, objectId, payload }) => {
     if (!projectId || !objectId || !payload?.transform) {
       return;
     }
 
-    const project = getProject(projectId);
+    const project = await getProject(projectId);
     if (!project) {
       return;
     }
@@ -648,7 +841,7 @@ io.on("connection", (socket) => {
         : object
     );
 
-    saveProjectRecord({
+    await saveProjectRecord({
       ...project,
       content: JSON.stringify(snapshot),
       objects: snapshot.objects,
@@ -658,12 +851,12 @@ io.on("connection", (socket) => {
     socket.to(projectId).emit("transform_object", { objectId, payload });
   });
 
-  socket.on("update_property", ({ projectId, objectId, payload }) => {
+  socket.on("update_property", async ({ projectId, objectId, payload }) => {
     if (!projectId || !objectId || !payload?.properties) {
       return;
     }
 
-    const project = getProject(projectId);
+    const project = await getProject(projectId);
     if (!project) {
       return;
     }
@@ -675,7 +868,7 @@ io.on("connection", (socket) => {
         : object
     );
 
-    saveProjectRecord({
+    await saveProjectRecord({
       ...project,
       content: JSON.stringify(snapshot),
       objects: snapshot.objects,
@@ -685,12 +878,12 @@ io.on("connection", (socket) => {
     socket.to(projectId).emit("update_property", { objectId, payload });
   });
 
-  socket.on("replace_geometry", ({ projectId, objectId, geometryData }) => {
+  socket.on("replace_geometry", async ({ projectId, objectId, geometryData }) => {
     if (!projectId || !objectId) {
       return;
     }
 
-    const project = getProject(projectId);
+    const project = await getProject(projectId);
     if (!project) {
       return;
     }
@@ -700,7 +893,7 @@ io.on("connection", (socket) => {
       object.id === objectId ? { ...object, geometryData } : object
     );
 
-    saveProjectRecord({
+    await saveProjectRecord({
       ...project,
       content: JSON.stringify(snapshot),
       objects: snapshot.objects,
@@ -747,7 +940,19 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => {
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+const startServer = async () => {
   ensureDataStore();
-  console.log(`DrawMatrix server listening on port ${PORT}`);
+  await connectMongo();
+
+  server.listen(PORT, () => {
+    console.log(`DrawMatrix server listening on port ${PORT}`);
+  });
+};
+
+startServer().catch((error) => {
+  console.error("Failed to start DrawMatrix server:", error);
+  process.exit(1);
 });
