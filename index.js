@@ -72,42 +72,6 @@ let mongoClient = null;
 let mongoDb = null;
 let mongoConnectionError = null;
 const RESERVED_USER_NAMES = ["Kovid", "Vedanth", "Mohith"];
-const HOST_USERNAME = "kovid";
-
-const getRoomHostId = (projectId) => {
-  const room = roomPresence[projectId] || {};
-  const host = Object.values(room).find((presence) => presence?.isHost);
-  return host?.userId || null;
-};
-
-const assignProjectHost = (projectId, nextHostUserId) => {
-  if (!projectId || !roomPresence[projectId]) {
-    return;
-  }
-
-  Object.keys(roomPresence[projectId]).forEach((userId) => {
-    roomPresence[projectId][userId] = {
-      ...roomPresence[projectId][userId],
-      isHost: userId === nextHostUserId,
-    };
-  });
-};
-
-const ensureProjectHost = (projectId) => {
-  if (!projectId || !roomPresence[projectId]) {
-    return;
-  }
-
-  const roomUsers = Object.values(roomPresence[projectId]);
-  if (roomUsers.length === 0 || roomUsers.some((presence) => presence?.isHost)) {
-    return;
-  }
-
-  const kovidPresence = roomUsers.find(
-    (presence) => String(presence?.name || "").trim().toLowerCase() === HOST_USERNAME
-  );
-  assignProjectHost(projectId, (kovidPresence || roomUsers[0]).userId);
-};
 
 const ensureDataStore = () => {
   if (!fs.existsSync(DATA_DIR)) {
@@ -826,7 +790,6 @@ const setUserStatus = async ({ presenceKey, email, userId, status }) => {
 };
 
 const emitPresenceList = (projectId) => {
-  ensureProjectHost(projectId);
   io.to(projectId).emit("room_presence_list", roomPresence[projectId] || {});
 };
 
@@ -948,11 +911,6 @@ app.get("/projects/:projectId", async (req, res) => {
 
 app.post("/api/projects/save", async (req, res) => {
   const payload = req.body || {};
-  const activeHostId = getRoomHostId(payload.projectId);
-  if (activeHostId && payload.userId !== activeHostId) {
-    res.status(403).json({ error: "Only the current host can save this project" });
-    return;
-  }
   const snapshot = parseSnapshot(payload.objects || payload.content);
 
   const project = await saveProjectRecord({
@@ -1029,30 +987,23 @@ io.on("connection", (socket) => {
       typeof payload === "object" ? String(payload?.presenceKey || "") : "";
     const email =
       typeof payload === "object" ? String(payload?.email || "") : "";
-    const requestedUserId =
-      typeof payload === "object" ? String(payload?.userId || "") : "";
-    const requestedUsername =
-      typeof payload === "object" ? String(payload?.username || "") : "";
-    const userColor =
-      typeof payload === "object" ? String(payload?.color || "") : "";
     const knownUser =
       (await createUserRecord({
         presenceKey,
         email,
-        username: requestedUsername,
+        username: typeof payload === "object" ? payload?.username : "",
       })) || {};
     const userId =
-      requestedUserId ||
       knownUser.userId ||
+      (typeof payload === "object" && payload?.userId) ||
       presenceKey ||
       email ||
       socket.id;
     const username =
-      requestedUsername ||
       knownUser.assignedName ||
       knownUser.username ||
+      (typeof payload === "object" && payload?.username) ||
       "Guest";
-    const isHostByName = String(username).trim().toLowerCase() === HOST_USERNAME;
 
     socket.join(projectId);
     socket.data.projectId = projectId;
@@ -1075,16 +1026,11 @@ io.on("connection", (socket) => {
       id: userId,
       userId,
       name: username,
-      color: userColor || "#38bdf8",
+      color: "#38bdf8",
       cursor: null,
       cameraPosition: [0, 0, 0],
       status: "online",
-      isHost: false,
     };
-
-    if (isHostByName || !getRoomHostId(projectId)) {
-      assignProjectHost(projectId, userId);
-    }
 
     const project =
       (await getProject(projectId)) ||
@@ -1112,35 +1058,15 @@ io.on("connection", (socket) => {
       roomPresence[projectId] = {};
     }
 
-    const { isHost: _ignoredIsHost, ...safePresence } = presence;
-
     roomPresence[projectId][userId] = {
       ...roomPresence[projectId][userId],
-      ...safePresence,
+      ...presence,
       id: userId,
       userId,
       status: "online",
     };
 
     io.to(projectId).emit("presence-update", { userId, presence: roomPresence[projectId][userId] });
-    emitPresenceList(projectId);
-  });
-
-  socket.on("transfer_host", ({ projectId, targetUserId }) => {
-    if (!projectId || !targetUserId) {
-      return;
-    }
-
-    const requesterId = socket.data?.userId;
-    if (!requesterId || getRoomHostId(projectId) !== requesterId) {
-      return;
-    }
-
-    if (!roomPresence[projectId]?.[targetUserId]) {
-      return;
-    }
-
-    assignProjectHost(projectId, targetUserId);
     emitPresenceList(projectId);
   });
 
@@ -1156,10 +1082,6 @@ io.on("connection", (socket) => {
 
   socket.on("create_object", async ({ projectId, payload }) => {
     if (!projectId || !payload) {
-      return;
-    }
-
-    if (getRoomHostId(projectId) !== socket.data?.userId) {
       return;
     }
 
@@ -1189,10 +1111,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    if (getRoomHostId(projectId) !== socket.data?.userId) {
-      return;
-    }
-
     const project = await getProject(projectId);
     if (!project) {
       return;
@@ -1213,10 +1131,6 @@ io.on("connection", (socket) => {
 
   socket.on("transform_object", async ({ projectId, objectId, payload }) => {
     if (!projectId || !objectId || !payload?.transform) {
-      return;
-    }
-
-    if (getRoomHostId(projectId) !== socket.data?.userId) {
       return;
     }
 
@@ -1247,10 +1161,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    if (getRoomHostId(projectId) !== socket.data?.userId) {
-      return;
-    }
-
     const project = await getProject(projectId);
     if (!project) {
       return;
@@ -1275,10 +1185,6 @@ io.on("connection", (socket) => {
 
   socket.on("replace_geometry", async ({ projectId, objectId, geometryData }) => {
     if (!projectId || !objectId) {
-      return;
-    }
-
-    if (getRoomHostId(projectId) !== socket.data?.userId) {
       return;
     }
 
@@ -1307,10 +1213,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    if (getRoomHostId(projectId) !== socket.data?.userId) {
-      return;
-    }
-
     if (!roomLocks[projectId]) {
       roomLocks[projectId] = {};
     }
@@ -1324,10 +1226,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    if (getRoomHostId(projectId) !== socket.data?.userId) {
-      return;
-    }
-
     if (roomLocks[projectId]) {
       delete roomLocks[projectId][objectId];
     }
@@ -1337,16 +1235,9 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     const { projectId, userId, presenceKey, email } = socket.data || {};
-    const wasHost =
-      Boolean(projectId) &&
-      Boolean(userId) &&
-      Boolean(roomPresence[projectId]?.[userId]?.isHost);
 
     if (projectId && userId && roomPresence[projectId]) {
       delete roomPresence[projectId][userId];
-      if (wasHost) {
-        ensureProjectHost(projectId);
-      }
       io.to(projectId).emit("presence-disconnect", userId);
       io.to(projectId).emit("unlock_all_by_user", { userId });
       emitPresenceList(projectId);
