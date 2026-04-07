@@ -389,7 +389,7 @@ const listMessages = async (projectId) => {
       .find({ projectId })
       .sort({ createdAt: 1 })
       .limit(200)
-      .project({ _id: 0, id: 1, user: 1, text: 1, time: 1 })
+      .project({ _id: 0, id: 1, user: 1, text: 1, time: 1, createdAt: 1 })
       .toArray();
   }
 
@@ -399,6 +399,7 @@ const listMessages = async (projectId) => {
 };
 
 const saveMessage = async (projectId, messageInput = {}) => {
+  const createdAt = messageInput.createdAt || new Date().toISOString();
   const nextMessage = {
     id:
       messageInput.id ||
@@ -412,7 +413,7 @@ const saveMessage = async (projectId, messageInput = {}) => {
         hour: "2-digit",
         minute: "2-digit",
       }),
-    createdAt: new Date().toISOString(),
+    createdAt,
   };
 
   if (usingMongo()) {
@@ -423,6 +424,7 @@ const saveMessage = async (projectId, messageInput = {}) => {
       user: nextMessage.user,
       text: nextMessage.text,
       time: nextMessage.time,
+      createdAt: nextMessage.createdAt,
     };
   }
 
@@ -437,6 +439,7 @@ const saveMessage = async (projectId, messageInput = {}) => {
       user: nextMessage.user,
       text: nextMessage.text,
       time: nextMessage.time,
+      createdAt: nextMessage.createdAt,
     },
   ].slice(-200);
   writeMessages(allMessages);
@@ -445,6 +448,7 @@ const saveMessage = async (projectId, messageInput = {}) => {
     user: nextMessage.user,
     text: nextMessage.text,
     time: nextMessage.time,
+    createdAt: nextMessage.createdAt,
   };
 };
 
